@@ -19,9 +19,28 @@ import datetime
 
 TOLERANCE = 1e-6
 
-# subgradient calculation of the objective w/r/t w and b
-# calculated among the training set
 def subgrad(w, b, x_train, y_train, C):
+    """Subgradient of the SVM objective for w and b in the region where
+    the hinge loss is greater than 0, calculated among the training set.
+
+    Parameters
+    ----------
+    x_train : ndarray
+        Matrix of the training examples
+    y_train : ndarray
+        Array of labels for the training examples in [-1, 1]
+    C : float
+        Slack penalty parameter of the models
+
+    Return value
+    ------------
+    w_grad : ndarray
+        Subgradient direction of the SVM objective from the training data for
+        the feature weights (can be calculated with the subgrad() method)
+    b_grad : float
+        Subgradient direction of the SVM objective from the training data for
+        the bias term (can be calculated with the subgrad() method)
+    """
 
     # initialize
     w_grad = w
@@ -39,21 +58,41 @@ def subgrad(w, b, x_train, y_train, C):
     return (w_grad, b_grad)
 
 
-# find the sets of indices of test examples currently predicted
-# to be positive (L), on the boundary (E), or negative (R)
-# calculated over the test set
 def LER(w, b, x_test):
+    """Find the sets of indices of test examples currently predicted to
+    be positive (L), exactly on the boundary (E), or negative (R) within
+    the test set for given values of the w and b parameters
+
+    Parameters
+    ----------
+    w : ndarray
+        Current value of the feature weights vector for the model
+    b : float
+        Current value of the model bias term
+    x_test : ndarray
+        Matrix of the test examples
+
+    Return value
+    ------------
+    L : ndarray
+        Array of test example indices currently predicted to be positive
+    E : ndarray
+        Array of test example indices currently predicted exactly on the decision
+        boundary
+    R : ndarray
+        Array of test example indices currently predicted to be negative
+    """
 
     L = []
     E = []
     R = []
 
+    # iterate through the test examples and append their indices
+    # to the appropriate list
     for j, x_j in enumerate(x_test):
 
         z = np.dot(w, x_j) + b
-        # should this be exactly 0 or 0 within some tolerance (e.g. 10^-10)?
-#        if z == 0:
-#        if abs(z) <= 0.000000001:
+
         if abs(z) <= 1e-6:
             E.append(j)
         elif z > 1e-6:
@@ -70,6 +109,8 @@ def nullspace(A, atol=1e-13, rtol=0):
 
     The algorithm used by this function is based on the singular value
     decomposition of `A`.
+
+    From http://scipy-cookbook.readthedocs.io/items/RankNullspace.html
 
     Parameters
     ----------
@@ -107,45 +148,76 @@ def nullspace(A, atol=1e-13, rtol=0):
 
 
 
-# calculate the feasible direction for the descent
-# using the subgradient from the training set and test data
-# E is list of indices of x_test (predicted on decision bound)
-# n_L is number of indices in L (predicted positives)
-# k is top k we want precision in
 def feasible_dir(w_grad, b_grad, x_test, E, n_L, k):
+    """Project a subgradient (w_grad, b_grad) onto the feasible solution cone
+    to find a feasible direction for the descent. Note that the subgradient
+    is calculated using the training data while the feasible direction is
+    determined based on the test examples such that no more than k test
+    examples will be predicted positive after each step of the search.
 
+    Parameters
+    ----------
+    w_grad : ndarray
+        Subgradient direction of the SVM objective from the training data for
+        the feature weights (can be calculated with the subgrad() method)
+    b_grad : float
+        Subgradient direction of the SVM objective from the training data for
+        the bias term (can be calculated with the subgrad() method)
+    x_test : ndarray
+        Matrix of the test examples
+    E : ndarray
+        Array of test example indices currently predicted exactly on the decision
+        boundary
+    n_L : int
+        Count of number of test examples currently predicted as positives, should
+        be no more than k
+    k : int
+        Number (at most) of test examples to predict as positives        
+
+    Return value
+    ------------
+    dw : ndarray
+        Feasible descending direction for the w parameter
+    db : float
+        Fesible descending direction for the b parameter
+    """
+
+    # start off with the examples in E sorted by how far they will move the loss with a step
+    # of (w_grad, b_grad)
     x_test_E = sorted([x_test[j] for j in E], key = lambda x : -np.dot(x, w_grad) - b_grad, reverse=True)
 
     # initialize values
     dw = -w_grad
     db = -b_grad
-    B = set()
+    B = set()       # set to keep track of examples that would move up based on the subgradient
 
-    # TODO: check if TTK algorithm is expecting 1-indexed data
-    # in which case, probably don't want to add 1 here for 0-indexed
-#    j0 = min(k - n_L, 1) + 1
+
+    # if we're currently predicting fewer than k positive examples, we'll start with the first example
+    # in our sorted list, otherwise we'll start with the second one (note that the python arrays here
+    # are 0-indexed while the pseudocode in the paper is 1-indexed). That is, we only want to let at
+    # most one example on the boundary move into the set of positive examples and don't want to let
+    # any examples move up if we're already predicting k positives.
     j0 = min(k - n_L, 1)
 
-#    for j_prime in range(j0, len(E)+1):
+
+    # iterate through the sorted examples in E to find the set of examples that might move from the
+    # boundary to above it and project the subgradient onto their nullspace to find a feasible 
+    # direction that will ensure they won't actually move off the boundary
     for j_prime in range(j0, len(E)):
 
+        # if none of the examples in the inner loop will move in a positive direction, we're done
         any_update = False
-#        for j_dbl_prime in range(j_prime, len(E)+1):
+
         for j_dbl_prime in range(j_prime, len(E)):
             if np.dot(x_test_E[j_dbl_prime], dw) + db > 1e-6:
                 any_update = True
                 B.add(j_prime)
-                # double-check dimensions; might need to be the transpose of this array
-                nulls = nullspace(np.array([np.append(x_test_E[jj], 1) for jj in B]))
-
                 # project (dw, db) onto null space of (x_jj, 1) where jj in B
-
-                # https://mail.scipy.org/pipermail/scipy-user/2009-May/021309.html
-#                (dw, db) = (nulls * np.dot(nulls, np.append(dw, db))[:,np.newaxis]).sum(axis=0)
+                nulls = nullspace(np.array([np.append(x_test_E[jj], 1) for jj in B]))
                 
                 # the columns of nulls are an orthonormal set of basis vectors for the nullspace
-                # of vectors in B, so the inner dot product gives the distances in each direction
-                # and the outer dot product the linear combination of the basis vectors yielding
+                # of vectors in B, so the inside dot product gives the distances in each direction
+                # and the outside dot product the linear combination of the basis vectors yielding
                 # projection:
                 proj = np.dot(nulls, np.dot(nulls.T, np.append(dw, db)))
                 db = proj[-1]
@@ -154,13 +226,35 @@ def feasible_dir(w_grad, b_grad, x_test, E, n_L, k):
                 break
 
         if not any_update:
-            # presumably this is break and not continue because we've sorted x_test_E?
+            # we can break out of the loop at this point because we've sorted x_test_E
             break
 
     return (dw, db)
 
 
 def calc_objective(w, b, x_train, y_train, C):
+    """Helper function to calculate the value of the SVM objective function given
+    the parameters w & b, training data, and the slack penalty C
+
+    Parameters
+    ----------
+    w : ndarray
+        Current value of the feature weights vector for the model
+    b : float
+        Current value of the model bias term
+    x_train : ndarray
+        Matrix of the training examples
+    y_train : ndarray
+        Array of labels for the training examples in [-1, 1]
+    C : float
+        Slack penalty parameter of the models
+
+    Return value
+    ------------
+    obj : float
+        The value of the SVM objective
+    """
+
     obj = 0.5 * np.dot(w, w)
     for i, x_i in enumerate(x_train):
         obj = obj + C * max(0, 1 - y_train[i]*(np.dot(w, x_i) + b) )
