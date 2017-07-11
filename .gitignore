@@ -1,0 +1,4 @@
+pickles/*
+logs/*
+*.csv
+*.h5
