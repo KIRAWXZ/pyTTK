@@ -3,7 +3,7 @@
 import ttk
 import numpy as np
 
-class TTKClassifier(Object):
+class TTKClassifier(object):
     def __init__(self, k, C, max_iter=5000):
         self._w = None
         self._b = None
