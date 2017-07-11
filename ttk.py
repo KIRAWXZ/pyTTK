@@ -167,23 +167,39 @@ def calc_objective(w, b, x_train, y_train, C):
     return obj
 
 
-def find_alpha_star(alpha0, w, b, dw, db, x_train, y_train, C):
-    # supposedly only need to check a handful of points, so should revisit
-    # see step_length() below for an implementation of the way the authors do this
-    best_alpha = None
-    min_obj = None
-    for alpha in np.linspace(0, 0.5*alpha0, 100):
-        obj = calc_objective(w + alpha*dw, b + alpha*db, x_train, y_train, C)
-        if min_obj is None or obj < min_obj:
-            min_obj = obj
-            best_alpha = alpha
-
-    return best_alpha
-
-
-# !! call this with alpha0 = 0.5*alpha_min unlike current call!
-# (and break the look if step length <= 0)
 def step_length(alpha0, w, b, dw, db, x_train, y_train, C):
+    """Calculate the optimal step length for a given iteration of the TTK descent.
+    Should be called with 0.5*alpha_min to reduce the risk of hitting the boundary
+    of the feasible solution cone. 
+
+    Because of the piecewise-quadratic and convex nature of the objective, we only 
+    have to check the set of points where an example crosses the decision boundary
+    as well as for a possible minimum between two such points.
+
+    Parameters
+    ----------
+    alpha0 : float
+        Maximum allowable step size to ensure step will yield a feasible solution
+    w : ndarray
+        Current value of the feature weights vector for the model
+    b : float
+        Current value of the model bias term
+    dw : ndarray
+        Feasible descending direction for the w parameter
+    db : float
+        Fesible descending direction for the b parameter
+    x_train : ndarray
+        Matrix of the training examples
+    y_train : ndarray
+        Array of labels for the training examples in [-1, 1]
+    C : float
+        Slack penalty parameter of the models
+
+    Return value
+    ------------
+    alpha_star : float
+        The optimal step size for the current iteration of the descent
+    """
 
     # number of examples in the training set
     n_ex = len(x_train)
@@ -322,16 +338,46 @@ def step_length(alpha0, w, b, dw, db, x_train, y_train, C):
     return min(stepLength, alpha0)
 
 
-def run_ttk(x_train, y_train, x_test, k, C=1.0, init_w=None, init_b=0, MAX_ITER=1000):
+def run_ttk(x_train, y_train, x_test, k, C=1.0, init_w=None, init_b=0, MAX_ITER=5000):
+    """Main method for running the transductive top k model.
 
+    Parameters
+    ----------
+    x_train : ndarray
+        Matrix of the training examples
+    y_train : ndarray
+        Array of labels for the training examples in [-1, 1]
+    x_test : ndarray
+        Matrix of the test examples
+    k : int
+        Number (at most) of test examples to predict as positives
+    C : float
+        Slack penalty parameter of the models
+    init_w : ndarray
+        Optional parameter for the starting point for the TTK model
+    init_b : float
+        Optional parameter for the starting point for the TTK model
+    MAX_ITER : int
+        Maximum number of iterations to run in fitting the model
+
+    If init_w and init_b are not specified, the model will initialize with a Linear SVM
+    model with b adjusted such that k test examples will fall above the decision boundary
+
+    Return value
+    ------------
+    w : ndarray
+        Array of feature weights from the model
+    b : float
+        Model bias term
+    """
+
+    # Either use the initial w & b parameter passed into the method or initial by running
+    # a linear SVM and adjusting b such that k examples are above the boundary
     if init_w is None:
-        # 1. initialize w, b by running a standard SVM classifier over the training set alone
         clf = LinearSVC(C=C)
         clf.fit(x_train, y_train)
         w = clf.coef_[0]           # primal problem coef
         b = clf.intercept_[0]
-
-        # 2. adjust b from (1) such that k examples are given positive labels
 
         # score the test examples and shift b so the kth-highest score is 0
         # (hence, k examples would be predicted in the positive class)
@@ -345,32 +391,25 @@ def run_ttk(x_train, y_train, x_test, k, C=1.0, init_w=None, init_b=0, MAX_ITER=
         init_score = sorted([np.dot(x_i, w) + b for x_i in x_test], reverse=True)
         b = b - init_score[k]
     
-    
-    """
-    # try random initialization...
-#    w = np.random.random(x_train.shape[1])
-    # hard-code to compare with octave code...
-    w = np.array([ 0.5770805 ,  0.4230523 ,  0.62119464,  0.49031366,  0.82608194,
-        0.48721005,  0.92030976,  0.40119418,  0.14444092,  0.23997352,
-        0.00223708,  0.68277997,  0.55770814,  0.78898785,  0.99689413,
-        0.85207142,  0.74239938,  0.11865236,  0.74801555,  0.15475511,
-        0.39269099,  0.22073969,  0.89393749,  0.42220048,  0.69707351,
-        0.57857768,  0.80324252,  0.84636949,  0.09291054,  0.18275305,
-        0.82883912,  0.49293092,  0.34527556])
-    b = 0
-    init_score = sorted([np.dot(x_i, w) + b for x_i in x_test], reverse=True)
-    b = b - init_score[k]
-    """
-    
 
     logging.info('INITIAL OBJECTIVE: {}'.format(calc_objective(w, b, x_train, y_train, C)))
 
+    # run the subgradient descent with at most MAX_ITER iterations
     for i in range(MAX_ITER):
 
+        # calculate the subgradient for the current model and project it onto
+        # the null space of a subset of the test set instances on the decision
+        # boundary (E), yielding dw and db -- see the original paper for details
         w_grad, b_grad = subgrad(w, b, x_train, y_train, C)
         L, E, R = LER(w, b, x_test)
         dw, db = feasible_dir(w_grad, b_grad, x_test, E, len(L), k)
 
+        # alpha_min here is the minimum value of the step descending step size that will
+        # result in a point in R (the currently predicted negative examples) crossing the
+        # decision boundary, which is the maximum step size we could take to guarantee
+        # feasible descending step without violating the constraint of no more than k
+        # positive examples (admittedly, alpha_min isn't a great name since it's the
+        # largest-allowable step size)
         alpha_min = None
         for j in R:
             if np.dot(x_test[j], dw) + db > 1e-6:
@@ -383,46 +422,64 @@ def run_ttk(x_train, y_train, x_test, k, C=1.0, init_w=None, init_b=0, MAX_ITER=
         if alpha_min is None:
             alpha_min = 1.0
 
-        # line search in (0, 0.5*alpha_min) to find best step size
-##        alpha_star = find_alpha_star(alpha_min, w, b, dw, db, x_train, y_train, C)
-
+        # calculate the optimal step size for this iteration of the search
+        # up to 0.5*alpha_min (multiplying by 0.5 to reduce the chance of hitting
+        # the feasible direction boundary)
         alpha_star = step_length(0.5*alpha_min, w, b, dw, db, x_train, y_train, C)
         if alpha_star <= 0:
             logging.warning('NON-POSITIVE STEP LENGTH: {}'.format(alpha_star))
             break
         
+        # calculate the objective at the previous step
         obj_old = calc_objective(w, b, x_train, y_train, C)
 
         # update w, b with the gradient and step size
         w = w + alpha_star*dw
         b = b + alpha_star*db
 
+        # calculate the objective after taking the step
         obj_new = calc_objective(w, b, x_train, y_train, C)
 
-#        print 'ITERATION %s, OBJECTIVE %s' % (i, obj_new)
-
+        # log the objective every 50 iterations
         if i % 50 == 0:
             logging.info('ITERATION {}, OBJECTIVE {}'.format(i, obj_new))
         
+        # check for convergence
         if abs(obj_new - obj_old) < TOLERANCE:
             logging.info('CONVERGED AFTER {} ITERATIONS'.format(i))
             break
 
+    # check if we exited the loop after the maximum number of iterations
     if i == MAX_ITER-1:
         logging.warning('WARNING: MAXIMUM NUMBER OF ITERATIONS REACHED')
 
-    # until convergence or MAX_ITER:
-    #   3a. calculate sub gradient for w,b in training set
-    #   3b. calculate L, E, R in test set
-    #   3c. calculate feasible direction
-    #   3d. determine step size, alpha
-    #   3e. step (w,b) by alpha*(dw,db)
 
     logging.info('FINAL OBJECTIVE: {}'.format(calc_objective(w, b, x_train, y_train, C)))
     
     return (w, b)
 
 def test_precision(w, b, x_test, y_test):
+    """Measure the precision and number of labeled examples above the decision
+    boundary given a parameter set (w, b) and test examples & labels.
+
+    Parameters
+    ----------
+    w : ndarray
+        Array of feature weights from the model
+    b : float
+        Model bias term
+    x_test : ndarray
+        Matrix of the test examples
+    y_test : ndarray
+        Array of labels for the test examples in [-1, 1]
+
+    Return value
+    ------------
+    len(labeled) : int
+        Number of labeled examples above the decision boundary
+    prec : float
+        Precision among the predicted positives
+    """
 
     # indices of predicted positives (L)
     L, E, R = LER(w, b, x_test)
@@ -440,22 +497,50 @@ def test_precision(w, b, x_test, y_test):
     labeled = df.loc[(df['pred']==1) & (df['obs'].notnull())]   # keep labeled examples (non-null obs) above threshold (pred==1)
     prec = 1.0*labeled['obs'].sum()/len(labeled)
 
-    # pred.sum() is number of predicted positives, which should also equal
-    # both len(L) and k
-    # return 1.0 * np.dot(pred, y_test_zero) / pred.sum()
-
     # return the number of labeled examples in top k and precision
     return (len(labeled), prec)
 
 
 def prep_data(train_matrix_file, test_matrix_file, scale_data, data_type):
+    """Read in and scale data for the TTK model. Data should be either in CSV or HDF5
+    format and is expected to contain a header and labels in a column named `outcome`.
+    Entity IDs and dates in `entity_id` and `as_of_date` columns.
 
+    Parameters
+    ----------
+    train_matrix_file : string
+        Path to the file with the training data in either CSV or HDF5 format
+        should contain a header and labels in an `outcome` column
+    test_matrix_file : string
+        Path to the file with the test data in either CSV or HDF5 format
+        should contain a header and labels in an `outcome` column
+    scale_data : string
+        Method for scaling the data: 'z' will scale to mean 0, stdev 1; 
+        'minmax' will scale to range [0,1]; 'none' will skip scaling
+    data_type : string
+        Specify the type of data to read in: 'csv', 'hdf5', or 'infer'
+        ('infer' will determine the data type based on the extension)
+
+    Return value
+    ------------
+    x_train : ndarray
+        Matrix of the training examples
+    y_train : ndarray
+        Array of labels for the training examples in [-1, 1]
+    x_test : ndarray
+        Matrix of the test examples
+    y_test : ndarray
+        Array of labels for the test examples in [-1, 1]
+    """
+
+    # if data_type is 'infer', determine the data type from file extension
     if data_type == 'infer':
         if train_matrix_file[-3:].lower() == 'csv':
             data_type = 'csv'
         if train_matrix_file[-2:].lower() == 'h5':
             data_type = 'hdf5'
 
+    # read in the data using the appropriate pandas method
     if data_type == 'csv':
         train_mat = pd.read_csv(train_matrix_file)
         test_mat = pd.read_csv(test_matrix_file)
@@ -472,15 +557,17 @@ def prep_data(train_matrix_file, test_matrix_file, scale_data, data_type):
     logging.debug('Train Columns Tail: {}'.format(train_mat.columns.values[-10:]))
     logging.debug('Test Columns Tail: {}'.format(test_mat.columns.values[-10:]))
 
+    # check that the train and test matrices have the same columns
     if list(train_mat.columns) != list(test_mat.columns):
         raise ValueError('Train and Test Matrix Column Mismatch')
 
-    # map the outcome variable to -1, 1 for SVM
-    train_mat['outcome'] = train_mat['outcome'].map({1: 1, 0: -1})
-    test_mat['outcome'] = test_mat['outcome'].map({1: 1, 0: -1})
+    # ensure the outcome variable is mapped to -1, 1 for SVM
+    train_mat['outcome'] = train_mat['outcome'].map({1: 1, 0: -1, -1: -1})
+    test_mat['outcome'] = test_mat['outcome'].map({1: 1, 0: -1, -1: -1})
 
     assert(list(train_mat.columns.values) == list(test_mat.columns.values))
 
+    # drop label, ID, and as of date columns from the matrices
     dropcols = ['outcome']
     for col in ['entity_id', 'officer_id', 'as_of_date']:
         if col in train_mat.columns:
@@ -494,6 +581,7 @@ def prep_data(train_matrix_file, test_matrix_file, scale_data, data_type):
             train_mat[col] = train_mat[col].astype(np.float64)
             test_mat[col] = test_mat[col].astype(np.float64)
 
+    # split out the train & test features and labels
     y_train = train_mat['outcome'].values
     x_train = train_mat.drop(dropcols, axis=1).values
 
@@ -503,6 +591,7 @@ def prep_data(train_matrix_file, test_matrix_file, scale_data, data_type):
     logging.debug('x_train.shape: {}'.format(x_train.shape))
     logging.debug('x_test.shape: {}'.format(x_test.shape))
 
+    # apply the desired scaling to the features
     if scale_data != 'none':
         if scale_data == 'z':
             logging.debug('Scaling Data with standard scaler...')
@@ -547,6 +636,7 @@ def main():
         filename=log_filename
     )
 
+    # read in and scale the data and determine the value of k to use
     x_train, y_train, x_test, y_test = prep_data(args.trainmat, args.testmat, args.scaledata, args.datatype)
     k = args.k if args.k else int(round(args.kfrac * x_test.shape[0]))
 
@@ -554,10 +644,10 @@ def main():
     logging.info('Using train matrix {}'.format(args.trainmat))
     logging.info('Using test matrix {}'.format(args.testmat))
 
+    # run the TTK model
     w, b = run_ttk(x_train, y_train, x_test, k, C=args.C, MAX_ITER=args.maxiter)
 
-    # Just dump the resulting w, b, and input parameters
-    # (no real reason to dump the train or test data since we already have this in S3)
+    # Dump the resulting w, b, and input parameters to a pickle file
     pickle_file = 'pickles/ttk_{}_C{}_k{}_Scale-{}'.format(
         str(datetime.datetime.now()).replace(' ', '_').replace(':', ''),
         args.C, args.k if args.k else args.kfrac, args.scaledata
@@ -567,6 +657,7 @@ def main():
     pf.flush()
     pf.close()
 
+    # check the precision for the resulting model
     num_labeled, precision = test_precision(w, b, x_test, y_test)
 
     logging.info('Precision at top {}: {} with {} labeled above threshold'.format(k, precision, num_labeled))
@@ -585,7 +676,7 @@ if __name__ == '__main__':
     parser.add_argument("-C", "--C", help="Slack Penalty Parameter",
                         action="store", default=1.0, type=float)
     parser.add_argument("-i", "--maxiter", help="max number of iterations to run",
-                        action="store", default=1000, type=int)
+                        action="store", default=5000, type=int)
     parser.add_argument("-s", "--scaledata", help="Scale data: 'z' will scale to mean 0, stdev 1; 'minmax' will scale to range [0,1]; default no scaling",
                         action="store", default='none', type=str.lower)
     parser.add_argument("-t", "--datatype", help="data type: 'csv', 'hdf5', or 'infer' (default)",
